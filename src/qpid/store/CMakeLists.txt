@@ -45,7 +45,7 @@ endif (CMAKE_COMPILER_IS_GNUCXX)
 
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
   if (MSVC)
-    add_definitions( 
+    add_definitions(
       /D "NOMINMAX"
       /D "WIN32_LEAN_AND_MEAN"
     )
@@ -114,3 +114,15 @@ if (BUILD_MSCLFS)
            DESTINATION ${QPIDD_MODULE_DIR}
            COMPONENT ${QPID_COMPONENT_BROKER})
 endif (BUILD_MSCLFS)
+
+
+# RethinkDB store plugin
+add_library (rethinkdb_store MODULE
+              rethinkdb/RethinkDBProvider.cpp)
+target_compile_options(rethinkdb_store PUBLIC -std=c++11 -Wno-error=vla -Wno-vla)
+target_include_directories(rethinkdb_store PUBLIC rethinkdb/librethinkdbxx)
+target_link_libraries (rethinkdb_store qpidbroker qpidcommon
+  ${CMAKE_SOURCE_DIR}/src/qpid/store/rethinkdb/librethinkdbxx/librethinkdb++.a)
+install (TARGETS rethinkdb_store # RUNTIME
+          DESTINATION ${QPIDD_MODULE_DIR}
+          COMPONENT ${QPID_COMPONENT_BROKER})
