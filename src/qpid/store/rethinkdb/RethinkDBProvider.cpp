@@ -21,6 +21,7 @@
 
 #include <stdlib.h>
 #include <string>
+#include <thread>
 
 #include <boost/thread/tss.hpp>
 
@@ -58,7 +59,7 @@ inline void TESTHR(HRESULT x) {if FAILED(x) _com_issue_error(x);};
 
 namespace qpid {
 namespace store {
-namespace ms_sql {
+namespace rethinkdb {
 
 // Table names
 const std::string TblBinding("tblBinding");
@@ -68,6 +69,24 @@ const std::string TblMessage("tblMessage");
 const std::string TblMessageMap("tblMessageMap");
 const std::string TblQueue("tblQueue");
 const std::string TblTpl("tblTPL");
+
+class IdSequence
+{
+    std::mutex lock;
+    uint64_t id;
+public:
+    IdSequence() : id(1) {}
+    uint64_t next() {
+        std::unique_lock<std::mutex> guard(lock);
+        if (!id) id++; // avoid 0 when folding around
+        return id++;
+    }
+
+    void reset(uint64_t value) {
+        // deliberately not threadsafe, used only on recovery
+        id = value;
+    }
+};
 
 /**
  * @class RethinkDBProvider
@@ -274,7 +293,6 @@ public:
 private:
     struct ProviderOptions : public qpid::Options
     {
-        std::string connectString;
         std::string databaseName;
 
         ProviderOptions(const std::string& name)
@@ -301,13 +319,17 @@ private:
     };
     ProviderOptions options;
 
+    IdSequence queueIdSequence;
+    IdSequence exchangeIdSequence;
+    IdSequence generalIdSequence;
+    IdSequence messageIdSequence;
+
     // Each thread has a separate connection to the database and also needs
     // to manage its COM initialize/finalize individually. This is done by
     // keeping a thread-specific State.
-    // boost::thread_specific_ptr<State> dbState;
+    boost::thread_specific_ptr<R::Connection> connections;
 
-    // State *initState();
-    // DatabaseConnection *initConnection(void);
+    R::Connection* initConnection(void);
     void createDb(R::Connection *conn, const std::string& name);
 };
 
@@ -328,9 +350,42 @@ RethinkDBProvider::~RethinkDBProvider()
 {
 }
 
-void RethinkDBProvider::earlyInitialize(Plugin::Target& /*target*/)
+void RethinkDBProvider::earlyInitialize(Plugin::Target& target)
 {
     QPID_LOG(notice, "RethinkDBProvider::earlyInitialize");
+    MessageStorePlugin *store = dynamic_cast<MessageStorePlugin *>(&target);
+    if (!store) {
+        QPID_LOG(notice, "RethinkDBProvider::earlyInitialize invalid store pointer");
+        return;
+    }
+
+    try {
+        std::unique_ptr<R::Connection> conn = R::connect();  // @TODO: use settings
+        bool database_exists = R::db_list()
+            .contains(options.databaseName)
+            .run(*conn)
+            .to_datum()
+            .extract_boolean();
+
+        if (!database_exists) {
+            QPID_LOG(notice, "RethinkDB: creating database " + options.databaseName);
+            createDb(conn.get(), options.databaseName);
+        } else {
+            QPID_LOG(notice, "RethinkDB: database located: " + options.databaseName);
+        }
+
+        conn->close();
+        store->providerAvailable("RethinkDB", this);
+    } catch (qpid::Exception& e) {
+        QPID_LOG(error, e.what());
+        return;
+    } catch (const R::Error& e) {
+        QPID_LOG(error, e.message);
+        return;
+    }
+
+    store->addFinalizer(boost::bind(&RethinkDBProvider::finalizeMe, this));
+
 
 /*
     MessageStorePlugin *store = dynamic_cast<MessageStorePlugin *>(&target);
@@ -387,10 +442,10 @@ void RethinkDBProvider::activate(MessageStorePlugin& /*store*/)
     QPID_LOG(info, "RethinkDB Provider is up");
 }
 
-void RethinkDBProvider::create(PersistableQueue& /*queue*/,
+void RethinkDBProvider::create(PersistableQueue& queue,
                                const qpid::framing::FieldTable& /*args, needed for jrnl*/)
 {
-    QPID_LOG(notice, "RethinkDBProvider::create");
+    QPID_LOG(notice, "RethinkDBProvider::create queue=" + queue.getName());
 
 /*
     DatabaseConnection *db = initConnection();
@@ -412,9 +467,9 @@ void RethinkDBProvider::create(PersistableQueue& /*queue*/,
 /**
  * Destroy a durable queue
  */
-void RethinkDBProvider::destroy(PersistableQueue& /*queue*/)
+void RethinkDBProvider::destroy(PersistableQueue& queue)
 {
-    QPID_LOG(notice, "RethinkDBProvider::destroy");
+    QPID_LOG(notice, "RethinkDBProvider::destroy queue=" + queue.getName());
 
 /*
     DatabaseConnection *db = initConnection();
@@ -451,10 +506,26 @@ void RethinkDBProvider::destroy(PersistableQueue& /*queue*/)
 /**
  * Record the existence of a durable exchange
  */
-void RethinkDBProvider::create(const PersistableExchange& /*exchange*/,
+void RethinkDBProvider::create(const PersistableExchange& exchange,
                                const qpid::framing::FieldTable& /*args*/)
 {
-    QPID_LOG(notice, "RethinkDBProvider::create");
+    QPID_LOG(notice, "RethinkDBProvider::create exchange=" + exchange.getName());
+
+    uint64_t primary_key(exchangeIdSequence.next());
+    std::vector<char> data(exchange.encodedSize());
+    qpid::framing::Buffer buff(data.data(), data.size());
+    exchange.encode(buff);
+
+    R::Connection* conn = initConnection();
+    R::Datum result = R::db(options.databaseName).table(TblExchange)
+        .insert(R::Object{
+            { "id", primary_key },
+            { "data", R::Binary(std::string(data.data(), data.size())) }
+        })
+        .run(*conn);
+
+    double inserted = result.extract_field("inserted").extract_number();
+    fprintf(stderr, "inserted: %f\n", inserted);
 
 /*
     DatabaseConnection *db = initConnection();
@@ -478,9 +549,9 @@ void RethinkDBProvider::create(const PersistableExchange& /*exchange*/,
 /**
  * Destroy a durable exchange
  */
-void RethinkDBProvider::destroy(const PersistableExchange& /*exchange*/)
+void RethinkDBProvider::destroy(const PersistableExchange& exchange)
 {
-    QPID_LOG(notice, "RethinkDBProvider::destroy");
+    QPID_LOG(notice, "RethinkDBProvider::destroy exchange=" + exchange.getName());
 
 /*
     DatabaseConnection *db = initConnection();
@@ -547,7 +618,7 @@ void RethinkDBProvider::unbind(const PersistableExchange& /*exchange*/,
                                const std::string& /*key*/,
                                const qpid::framing::FieldTable& /*args*/)
 {
-    QPID_LOG(notice, "RethinkDBProvider::create");
+    QPID_LOG(notice, "RethinkDBProvider::unbind");
 
 /*
     DatabaseConnection *db = initConnection();
@@ -575,9 +646,9 @@ void RethinkDBProvider::unbind(const PersistableExchange& /*exchange*/,
 /**
  * Record generic durable configuration
  */
-void RethinkDBProvider::create(const PersistableConfig& /*config*/)
+void RethinkDBProvider::create(const PersistableConfig& config)
 {
-    QPID_LOG(notice, "RethinkDBProvider::create");
+    QPID_LOG(notice, "RethinkDBProvider::create config=" + config.getName());
 
 /*
     DatabaseConnection *db = initConnection();
@@ -1109,47 +1180,73 @@ void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& /*recovere
 */
 }
 
-void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& /*recoverer*/,
-                                         ExchangeMap& /*exchangeMap*/)
+void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& recoverer,
+                                         ExchangeMap& exchangeMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverExchanges");
 
-/*
-    DatabaseConnection *db = 0;
     try {
-        db = initConnection();
-        BlobRecordset rsExchanges;
-        rsExchanges.open(db, TblExchange);
-        _RecordsetPtr p = (_RecordsetPtr)rsExchanges;
-        if (p->BOF && p->EndOfFile)
-            return;   // Nothing to do
-        p->MoveFirst();
-        while (!p->EndOfFile) {
-            uint64_t id = p->Fields->Item["persistenceId"]->Value;
-            long blobSize = p->Fields->Item["fieldTableBlob"]->ActualSize;
-            BlobAdapter blob(blobSize);
-            blob = p->Fields->Item["fieldTableBlob"]->GetChunk(blobSize);
-            // Recreate the Exchange instance, reset its ID, and remember the
-            // ones restored for matching up when recovering bindings.
-            broker::RecoverableExchange::shared_ptr exchange =
-                recoverer.recoverExchange(blob);
-            exchange->setPersistenceId(id);
-            exchangeMap[id] = exchange;
-            p->MoveNext();
+        uint64_t max_exchanges = 0;
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(TblExchange).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum exchange_data = cursor.next();
+            uint64_t primary_key =
+                static_cast<uint64_t>(exchange_data.extract_field("id").extract_number());
+            R::Binary data = exchange_data.extract_field("data").extract_binary();
+
+            qpid::framing::Buffer buff(
+                const_cast<char*>(data.data.data()), (uint32_t)data.data.size());
+            broker::RecoverableExchange::shared_ptr exchange = recoverer.recoverExchange(buff);
+            exchange->setPersistenceId(primary_key);
+            exchangeMap[primary_key] = exchange;
+
+            fprintf(stderr, "   recovered exchange(id=%lu, name=%s)\n",
+                primary_key, exchange->getName().c_str());
+            max_exchanges = std::max(max_exchanges, primary_key);
         }
+
+        // start sequence generation one after highest id we recovered
+        exchangeIdSequence.reset(max_exchanges + 1);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::recoverExchanges exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering exchanges",
-                           e,
-                           db ? db->getErrors() : "");
-    }
-*/
 }
 
-void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& /*recoverer*/,
-                                      QueueMap& /*queueMap*/)
+void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& recoverer,
+                                      QueueMap& queueMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverQueues");
+
+    try {
+        uint64_t max_queues = 0;
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(TblQueue).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum queue_data = cursor.next();
+            uint64_t primary_key =
+                static_cast<uint64_t>(queue_data.extract_field("id").extract_number());
+            R::Binary data = queue_data.extract_field("data").extract_binary();
+
+            qpid::framing::Buffer buff(
+                const_cast<char*>(data.data.data()), (uint32_t)data.data.size());
+            broker::RecoverableQueue::shared_ptr queue = recoverer.recoverQueue(buff);
+            queue->setPersistenceId(primary_key);
+            queueMap[primary_key] = queue;
+
+            fprintf(stderr, "   recovered queue(id=%lu, name=%s)\n",
+                primary_key, queue->getName().c_str());
+            max_queues = std::max(max_queues, primary_key);
+        }
+
+        // start sequence generation one after highest id we recovered
+        queueIdSequence.reset(max_queues + 1);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::recoverQueues exception: " + e.message);
+        throw e;
+    }
+
 
 /*
     DatabaseConnection *db = 0;
@@ -1298,6 +1395,20 @@ DatabaseConnection* RethinkDBProvider::initConnection(void)
 }
 */
 
+R::Connection* RethinkDBProvider::initConnection(void)
+{
+    QPID_LOG(notice, "RethinkDBProvider::initConnection");
+
+    R::Connection* conn = connections.get();
+    if (!conn) {
+        std::unique_ptr<R::Connection> conn_ = R::connect();
+        conn = conn_.release();
+        connections.reset(conn);
+    }
+
+    return conn;
+}
+
 void RethinkDBProvider::createDb(R::Connection *conn, const std::string& name)
 {
     try {
@@ -1392,4 +1503,4 @@ void RethinkDBProvider::dump()
 }
 
 
-}}} // namespace qpid::store::ms_sql
+}}} // namespace qpid::store::rethinkdb

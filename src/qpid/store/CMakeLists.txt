@@ -118,11 +118,16 @@ endif (BUILD_MSCLFS)
 
 # RethinkDB store plugin
 add_library (rethinkdb_store MODULE
+              MessageStorePlugin.cpp
               rethinkdb/RethinkDBProvider.cpp)
+
+find_package(Boost ${Boost_minversion} REQUIRED COMPONENTS thread)
+
 target_compile_options(rethinkdb_store PUBLIC -std=c++11 -Wno-error=vla -Wno-vla)
 target_include_directories(rethinkdb_store PUBLIC rethinkdb/librethinkdbxx)
-target_link_libraries (rethinkdb_store qpidbroker qpidcommon
+target_link_libraries (rethinkdb_store qpidbroker qpidcommon ${Boost_LIBRARIES}
   ${CMAKE_SOURCE_DIR}/src/qpid/store/rethinkdb/librethinkdbxx/librethinkdb++.a)
+
 install (TARGETS rethinkdb_store # RUNTIME
           DESTINATION ${QPIDD_MODULE_DIR}
           COMPONENT ${QPID_COMPONENT_BROKER})
