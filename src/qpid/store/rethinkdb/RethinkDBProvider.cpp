@@ -33,6 +33,8 @@
 #include "rethinkdb.h"
 namespace R = RethinkDB;
 
+#include "RethinkDBException.h"
+
 /*
 #include "AmqpTransaction.h"
 #include "BlobAdapter.h"
@@ -290,6 +292,9 @@ public:
     virtual void recoverTransactions(qpid::broker::RecoveryManager& recoverer,
                                      PreparedTransactionMap& dtxMap);
 
+private:    // helpers
+    bool create(const std::string& table, IdSequence& seq, const qpid::broker::Persistable& p);
+
 private:
     struct ProviderOptions : public qpid::Options
     {
@@ -321,7 +326,7 @@ private:
 
     IdSequence queueIdSequence;
     IdSequence exchangeIdSequence;
-    IdSequence generalIdSequence;
+    IdSequence configIdSequence;
     IdSequence messageIdSequence;
 
     // Each thread has a separate connection to the database and also needs
@@ -338,7 +343,7 @@ static RethinkDBProvider static_instance_registers_plugin;
 void RethinkDBProvider::finalizeMe()
 {
     QPID_LOG(notice, "RethinkDBProvider::finalizeMe");
-    // dbState.reset();
+    connections.reset();
 }
 
 RethinkDBProvider::RethinkDBProvider()
@@ -385,53 +390,6 @@ void RethinkDBProvider::earlyInitialize(Plugin::Target& target)
     }
 
     store->addFinalizer(boost::bind(&RethinkDBProvider::finalizeMe, this));
-
-
-/*
-    MessageStorePlugin *store = dynamic_cast<MessageStorePlugin *>(&target);
-    if (store) {
-        // If the database init fails, report it and don't register; give
-        // the rest of the broker a chance to run.
-        //
-        // Don't try to initConnection() since that will fail if the
-        // database doesn't exist. Instead, try to open a connection without
-        // a database name, then search for the database. There's still a
-        // chance this provider won't be selected for the store too, so be
-        // be sure to close the database connection before return to avoid
-        // leaving a connection up that will not be used.
-        try {
-            initState();     // This initializes COM
-            std::auto_ptr<DatabaseConnection> db(new DatabaseConnection());
-            db->open(options.connectString, "");
-            _ConnectionPtr conn(*db);
-            _RecordsetPtr pCatalogs = NULL;
-            VariantHelper<std::string> catalogName(options.catalogName);
-            pCatalogs = conn->OpenSchema(adSchemaCatalogs, catalogName);
-            if (pCatalogs->EndOfFile) {
-                // Database doesn't exist; create it
-                QPID_LOG(notice,
-                         "MSSQL: Creating database " + options.catalogName);
-                createDb(db.get(), options.catalogName);
-            }
-            else {
-                QPID_LOG(notice,
-                         "MSSQL: Database located: " + options.catalogName);
-            }
-            if (pCatalogs) {
-                if (pCatalogs->State == adStateOpen)
-                    pCatalogs->Close();
-                pCatalogs = 0;
-            }
-            db->close();
-            store->providerAvailable("MSSQL", this);
-        }
-        catch (qpid::Exception &e) {
-            QPID_LOG(error, e.what());
-            return;
-        }
-        store->addFinalizer(boost::bind(&RethinkDBProvider::finalizeMe, this));
-    }
-*/
 }
 
 void RethinkDBProvider::initialize(Plugin::Target& /*target*/)
@@ -442,26 +400,51 @@ void RethinkDBProvider::activate(MessageStorePlugin& /*store*/)
     QPID_LOG(info, "RethinkDB Provider is up");
 }
 
+bool RethinkDBProvider::create(const std::string& table, IdSequence& seq,
+                               const qpid::broker::Persistable& p)
+{
+    uint64_t primary_key(seq.next());
+    std::vector<char> data(p.encodedSize());
+    qpid::framing::Buffer blob(data.data(), data.size());
+    p.encode(blob);
+
+    try {
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(table)
+            .insert(R::Object{
+                { "id", primary_key },
+                { "blob", R::Binary(std::string(data.data(), data.size())) }
+            })
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::create exception: " + e.message);
+        throw e;
+    }
+
+    // @TODO:
+    //  - maybe add a conflict strategy
+    //  - return `false` if key already exists; don't set persistence id in this case'
+    //  - cleanup if there is any sort of error
+
+    p.setPersistenceId(primary_key);
+    return true;
+}
+
 void RethinkDBProvider::create(PersistableQueue& queue,
-                               const qpid::framing::FieldTable& /*args, needed for jrnl*/)
+                               const qpid::framing::FieldTable& /*args*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::create queue=" + queue.getName());
+    if (queue.getPersistenceId()) {
+        THROW_RDB_EXCEPTION("Queue already created: " + queue.getName());
+    }
 
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsQueues;
     try {
-        db->beginTransaction();
-        rsQueues.open(db, TblQueue);
-        rsQueues.add(queue);
-        db->commitTransaction();
+        if (!create(TblQueue, queueIdSequence, queue)) {
+            THROW_RDB_EXCEPTION("Queue already exists: " + queue.getName());
+        }
+    } catch (const R::Error& e) {
+        THROW_RDB_EXCEPTION_2("Error creating queue named " + queue.getName(), e);
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error creating queue " + queue.getName(), e, errs);
-    }
-*/
 }
 
 /**
@@ -510,40 +493,17 @@ void RethinkDBProvider::create(const PersistableExchange& exchange,
                                const qpid::framing::FieldTable& /*args*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::create exchange=" + exchange.getName());
+    if (exchange.getPersistenceId()) {
+        THROW_RDB_EXCEPTION("Exchange already created: " + exchange.getName());
+    }
 
-    uint64_t primary_key(exchangeIdSequence.next());
-    std::vector<char> data(exchange.encodedSize());
-    qpid::framing::Buffer buff(data.data(), data.size());
-    exchange.encode(buff);
-
-    R::Connection* conn = initConnection();
-    R::Datum result = R::db(options.databaseName).table(TblExchange)
-        .insert(R::Object{
-            { "id", primary_key },
-            { "data", R::Binary(std::string(data.data(), data.size())) }
-        })
-        .run(*conn);
-
-    double inserted = result.extract_field("inserted").extract_number();
-    fprintf(stderr, "inserted: %f\n", inserted);
-
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsExchanges;
     try {
-        db->beginTransaction();
-        rsExchanges.open(db, TblExchange);
-        rsExchanges.add(exchange);
-        db->commitTransaction();
+        if (!create(TblExchange, exchangeIdSequence, exchange)) {
+            THROW_RDB_EXCEPTION("Exchange already exists: " + exchange.getName());
+        }
+    } catch (const R::Error& e) {
+        THROW_RDB_EXCEPTION_2("Error creating exchange named " + exchange.getName(), e);
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error creating exchange " + exchange.getName(),
-                           e,
-                           errs);
-    }
-*/
 }
 
 /**
@@ -649,22 +609,17 @@ void RethinkDBProvider::unbind(const PersistableExchange& /*exchange*/,
 void RethinkDBProvider::create(const PersistableConfig& config)
 {
     QPID_LOG(notice, "RethinkDBProvider::create config=" + config.getName());
+    if (config.getPersistenceId()) {
+        THROW_RDB_EXCEPTION("Config already created: " + config.getName());
+    }
 
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsConfigs;
     try {
-        db->beginTransaction();
-        rsConfigs.open(db, TblConfig);
-        rsConfigs.add(config);
-        db->commitTransaction();
+        if (!create(TblConfig, configIdSequence, config)) {
+            THROW_RDB_EXCEPTION("Config already exists: " + config.getName());
+        }
+    } catch (const R::Error& e) {
+        THROW_RDB_EXCEPTION_2("Error creating config named " + config.getName(), e);
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error creating config " + config.getName(), e, errs);
-    }
-*/
 }
 
 /**
@@ -1193,11 +1148,11 @@ void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& recovere
             R::Datum exchange_data = cursor.next();
             uint64_t primary_key =
                 static_cast<uint64_t>(exchange_data.extract_field("id").extract_number());
-            R::Binary data = exchange_data.extract_field("data").extract_binary();
+            R::Binary blob_data = exchange_data.extract_field("blob").extract_binary();
 
-            qpid::framing::Buffer buff(
-                const_cast<char*>(data.data.data()), (uint32_t)data.data.size());
-            broker::RecoverableExchange::shared_ptr exchange = recoverer.recoverExchange(buff);
+            qpid::framing::Buffer blob(
+                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
+            broker::RecoverableExchange::shared_ptr exchange = recoverer.recoverExchange(blob);
             exchange->setPersistenceId(primary_key);
             exchangeMap[primary_key] = exchange;
 
@@ -1227,11 +1182,11 @@ void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& recoverer,
             R::Datum queue_data = cursor.next();
             uint64_t primary_key =
                 static_cast<uint64_t>(queue_data.extract_field("id").extract_number());
-            R::Binary data = queue_data.extract_field("data").extract_binary();
+            R::Binary blob_data = queue_data.extract_field("blob").extract_binary();
 
-            qpid::framing::Buffer buff(
-                const_cast<char*>(data.data.data()), (uint32_t)data.data.size());
-            broker::RecoverableQueue::shared_ptr queue = recoverer.recoverQueue(buff);
+            qpid::framing::Buffer blob(
+                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
+            broker::RecoverableQueue::shared_ptr queue = recoverer.recoverQueue(blob);
             queue->setPersistenceId(primary_key);
             queueMap[primary_key] = queue;
 
@@ -1246,37 +1201,6 @@ void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& recoverer,
         QPID_LOG(error, "RethinkDBProvider::recoverQueues exception: " + e.message);
         throw e;
     }
-
-
-/*
-    DatabaseConnection *db = 0;
-    try {
-        db = initConnection();
-        BlobRecordset rsQueues;
-        rsQueues.open(db, TblQueue);
-        _RecordsetPtr p = (_RecordsetPtr)rsQueues;
-        if (p->BOF && p->EndOfFile)
-            return;   // Nothing to do
-        p->MoveFirst();
-        while (!p->EndOfFile) {
-            uint64_t id = p->Fields->Item["persistenceId"]->Value;
-            long blobSize = p->Fields->Item["fieldTableBlob"]->ActualSize;
-            BlobAdapter blob(blobSize);
-            blob = p->Fields->Item["fieldTableBlob"]->GetChunk(blobSize);
-            // Recreate the Queue instance and reset its ID.
-            broker::RecoverableQueue::shared_ptr queue =
-                recoverer.recoverQueue(blob);
-            queue->setPersistenceId(id);
-            queueMap[id] = queue;
-            p->MoveNext();
-        }
-    }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering queues",
-                           e,
-                           db ? db->getErrors() : "");
-    }
-*/
 }
 
 void RethinkDBProvider::recoverBindings(qpid::broker::RecoveryManager& /*recoverer*/,
@@ -1284,6 +1208,51 @@ void RethinkDBProvider::recoverBindings(qpid::broker::RecoveryManager& /*recover
                                         const QueueMap& /*queueMap*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverBindings");
+
+    // R::Connection* conn = initConnection();
+    // R::Cursor cursor = R::db(options.databaseName).table(TblBinding).run(*conn);
+    // while (cursor.has_next()) {
+
+    // }
+
+/*
+    if (rs->BOF && rs->EndOfFile)
+        return;   // Nothing to do
+    rs->MoveFirst();
+    Binding b;
+    IADORecordBinding *piAdoRecordBinding;
+    rs->QueryInterface(__uuidof(IADORecordBinding),
+                       (LPVOID *)&piAdoRecordBinding);
+    piAdoRecordBinding->BindToRecordset(&b);
+    while (!rs->EndOfFile) {
+        long blobSize = rs->Fields->Item["fieldTableBlob"]->ActualSize;
+        BlobAdapter blob(blobSize);
+        blob = rs->Fields->Item["fieldTableBlob"]->GetChunk(blobSize);
+        store::ExchangeMap::const_iterator exch = exchMap.find(b.exchangeId);
+        if (exch == exchMap.end()) {
+            std::ostringstream msg;
+            msg << "Error recovering bindings; exchange ID " << b.exchangeId
+                << " not found in exchange map";
+            throw qpid::Exception(msg.str());
+        }
+        broker::RecoverableExchange::shared_ptr exchPtr = exch->second;
+        store::QueueMap::const_iterator q = queueMap.find(b.queueId);
+        if (q == queueMap.end()) {
+            std::ostringstream msg;
+            msg << "Error recovering bindings; queue ID " << b.queueId
+                << " not found in queue map";
+            throw qpid::Exception(msg.str());
+        }
+        broker::RecoverableQueue::shared_ptr qPtr = q->second;
+        // The recovery manager wants the queue name, so get it from the
+        // RecoverableQueue.
+        std::string key(b.routingKey);
+        exchPtr->bind(qPtr->getName(), key, blob);
+        rs->MoveNext();
+    }
+
+    piAdoRecordBinding->Release();
+*/
 
 /*
     DatabaseConnection *db = 0;
@@ -1397,8 +1366,6 @@ DatabaseConnection* RethinkDBProvider::initConnection(void)
 
 R::Connection* RethinkDBProvider::initConnection(void)
 {
-    QPID_LOG(notice, "RethinkDBProvider::initConnection");
-
     R::Connection* conn = connections.get();
     if (!conn) {
         std::unique_ptr<R::Connection> conn_ = R::connect();
