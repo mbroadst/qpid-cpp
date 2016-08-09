@@ -294,6 +294,10 @@ public:
 
 private:    // helpers
     bool create(const std::string& table, IdSequence& seq, const qpid::broker::Persistable& p);
+    void destroy(const std::string& table, const qpid::broker::Persistable& p);
+
+    void deleteBindingsForQueue(const qpid::broker::PersistableQueue& queue);
+    void deleteBindingsForExchange(const qpid::broker::PersistableExchange& exchange);
 
 private:
     struct ProviderOptions : public qpid::Options
@@ -430,6 +434,30 @@ bool RethinkDBProvider::create(const std::string& table, IdSequence& seq,
     return true;
 }
 
+void RethinkDBProvider::deleteBindingsForQueue(const qpid::broker::PersistableQueue& /*queue*/)
+{
+    // @TODO: implement this
+}
+
+void RethinkDBProvider::deleteBindingsForExchange(const qpid::broker::PersistableExchange& /*exchange*/)
+{
+    // @TODO: implement this
+}
+
+void RethinkDBProvider::destroy(const std::string& table, const qpid::broker::Persistable& p)
+{
+    try {
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(table)
+            .get(p.getPersistenceId())
+            .delete_()
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::destroy exception: " + e.message);
+        throw e;
+    }
+}
+
 void RethinkDBProvider::create(PersistableQueue& queue,
                                const qpid::framing::FieldTable& /*args*/)
 {
@@ -453,37 +481,9 @@ void RethinkDBProvider::create(PersistableQueue& queue,
 void RethinkDBProvider::destroy(PersistableQueue& queue)
 {
     QPID_LOG(notice, "RethinkDBProvider::destroy queue=" + queue.getName());
-
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsQueues;
-    BindingRecordset rsBindings;
-    MessageRecordset rsMessages;
-    MessageMapRecordset rsMessageMaps;
-    try {
-        db->beginTransaction();
-        rsQueues.open(db, TblQueue);
-        rsBindings.open(db, TblBinding);
-        rsMessages.open(db, TblMessage);
-        rsMessageMaps.open(db, TblMessageMap);
-        // Remove bindings first; the queue IDs can't be ripped out from
-        // under the references in the bindings table. Then remove the
-        // message->queue entries for the queue, also because the queue can't
-        // be deleted while there are references to it. If there are messages
-        // orphaned by removing the queue references, they're deleted by
-        // a trigger on the tblMessageMap table. Lastly, the queue record
-        // can be removed.
-        rsBindings.removeForQueue(queue.getPersistenceId());
-        rsMessageMaps.removeForQueue(queue.getPersistenceId());
-        rsQueues.remove(queue);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error deleting queue " + queue.getName(), e, errs);
-    }
-*/
+    deleteBindingsForQueue(queue);
+    destroy(TblQueue, queue);
+    // @TODO: delete all messages associated with queue
 }
 
 /**
@@ -512,95 +512,75 @@ void RethinkDBProvider::create(const PersistableExchange& exchange,
 void RethinkDBProvider::destroy(const PersistableExchange& exchange)
 {
     QPID_LOG(notice, "RethinkDBProvider::destroy exchange=" + exchange.getName());
-
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsExchanges;
-    BindingRecordset rsBindings;
-    try {
-        db->beginTransaction();
-        rsExchanges.open(db, TblExchange);
-        rsBindings.open(db, TblBinding);
-        // Remove bindings first; the exchange IDs can't be ripped out from
-        // under the references in the bindings table.
-        rsBindings.removeForExchange(exchange.getPersistenceId());
-        rsExchanges.remove(exchange);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error deleting exchange " + exchange.getName(),
-                           e,
-                           errs);
-    }
-*/
+    deleteBindingsForExchange(exchange);
+    destroy(TblExchange, exchange);
 }
 
 /**
  * Record a binding
  */
-void RethinkDBProvider::bind(const PersistableExchange& /*exchange*/,
-                             const PersistableQueue& /*queue*/,
-                             const std::string& /*key*/,
-                             const qpid::framing::FieldTable& /*args*/)
+void RethinkDBProvider::bind(const PersistableExchange& exchange,
+                             const PersistableQueue& queue,
+                             const std::string& key,
+                             const qpid::framing::FieldTable& args)
 {
     QPID_LOG(notice, "RethinkDBProvider::bind");
 
-/*
-    DatabaseConnection *db = initConnection();
-    BindingRecordset rsBindings;
+    std::vector<char> args_data(args.encodedSize());
+    qpid::framing::Buffer args_blob(args_data.data(), args_data.size());
+    args.encode(args_blob);
+
     try {
-        db->beginTransaction();
-        rsBindings.open(db, TblBinding);
-        rsBindings.add(exchange.getPersistenceId(),
-                       queue.getPersistenceId(),
-                       key,
-                       args);
-        db->commitTransaction();
+        R::Connection* conn = initConnection();
+
+        // @TODO: optimize this later if its important, perhaps use a compound
+        //        index of an array of all four values?
+        R::db(options.databaseName).table(TblBinding)
+            .insert(R::Object{
+                { "exchange_id", exchange.getPersistenceId() },
+                { "queue_id", queue.getPersistenceId() },
+                { "routing_key", key },
+                { "args", R::Binary(std::string(args_data.data(), args_data.size())) }
+            })
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::bind exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error binding exchange " + exchange.getName() +
-                           " to queue " + queue.getName(),
-                           e,
-                           errs);
-    }
-*/
 }
 
 /**
  * Forget a binding
  */
-void RethinkDBProvider::unbind(const PersistableExchange& /*exchange*/,
-                               const PersistableQueue& /*queue*/,
-                               const std::string& /*key*/,
-                               const qpid::framing::FieldTable& /*args*/)
+void RethinkDBProvider::unbind(const PersistableExchange& exchange,
+                               const PersistableQueue& queue,
+                               const std::string& key,
+                               const qpid::framing::FieldTable& args)
 {
     QPID_LOG(notice, "RethinkDBProvider::unbind");
 
-/*
-    DatabaseConnection *db = initConnection();
-    BindingRecordset rsBindings;
+    std::vector<char> args_data(args.encodedSize());
+    qpid::framing::Buffer args_blob(args_data.data(), args_data.size());
+    args.encode(args_blob);
+
     try {
-        db->beginTransaction();
-        rsBindings.open(db, TblBinding);
-        rsBindings.remove(exchange.getPersistenceId(),
-                          queue.getPersistenceId(),
-                          key,
-                          args);
-        db->commitTransaction();
+        R::Connection* conn = initConnection();
+
+        // @TODO: optimize this later if its important, perhaps use a compound
+        //        index of an array of all four values?
+        R::db(options.databaseName).table(TblBinding)
+            .filter(R::Object{
+                { "exchange_id", exchange.getPersistenceId() },
+                { "queue_id", queue.getPersistenceId() },
+                { "routing_key", key },
+                { "args", R::Binary(std::string(args_data.data(), args_data.size())) }
+            })
+            .delete_()
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::unbind exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error unbinding exchange " + exchange.getName() +
-                           " from queue " + queue.getName(),
-                           e,
-                           errs);
-    }
-*/
 }
 
 /**
@@ -625,25 +605,10 @@ void RethinkDBProvider::create(const PersistableConfig& config)
 /**
  * Destroy generic durable configuration
  */
-void RethinkDBProvider::destroy(const PersistableConfig& /*config*/)
+void RethinkDBProvider::destroy(const PersistableConfig& config)
 {
-    QPID_LOG(notice, "RethinkDBProvider::stage");
-
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsConfigs;
-    try {
-        db->beginTransaction();
-        rsConfigs.open(db, TblConfig);
-        rsConfigs.remove(config);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error deleting config " + config.getName(), e, errs);
-    }
-*/
+    QPID_LOG(notice, "RethinkDBProvider::destroy config=" + config.getName());
+    destroy(TblConfig, config);
 }
 
 /**
