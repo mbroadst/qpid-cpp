@@ -296,6 +296,10 @@ private:    // helpers
     bool create(const std::string& table, IdSequence& seq, const qpid::broker::Persistable& p);
     void destroy(const std::string& table, const qpid::broker::Persistable& p);
 
+    template <typename RecoverableType, typename TypeMap>
+    void recover_helper(const std::string &table, IdSequence& seq,
+                        qpid::broker::RecoveryManager& recoverer, TypeMap* internal_map = nullptr);
+
     void deleteBindingsForQueue(const qpid::broker::PersistableQueue& queue);
     void deleteBindingsForExchange(const qpid::broker::PersistableExchange& exchange);
 
@@ -472,6 +476,72 @@ void RethinkDBProvider::create(PersistableQueue& queue,
         }
     } catch (const R::Error& e) {
         THROW_RDB_EXCEPTION_2("Error creating queue named " + queue.getName(), e);
+    }
+}
+
+template <typename RecoverableType>
+RecoverableType recover_type(
+    qpid::broker::RecoveryManager& recoverer, qpid::framing::Buffer& blob)
+{
+    return 0;
+}
+
+template <>
+qpid::broker::RecoverableExchange::shared_ptr recover_type(
+    qpid::broker::RecoveryManager& recoverer, qpid::framing::Buffer& blob)
+{
+    return recoverer.recoverExchange(blob);
+}
+
+template <>
+qpid::broker::RecoverableQueue::shared_ptr recover_type(
+    qpid::broker::RecoveryManager& recoverer, qpid::framing::Buffer& blob)
+{
+    return recoverer.recoverQueue(blob);
+}
+
+template <>
+qpid::broker::RecoverableConfig::shared_ptr recover_type(
+    qpid::broker::RecoveryManager& recoverer, qpid::framing::Buffer& blob)
+{
+    return recoverer.recoverConfig(blob);
+}
+
+template <typename RecoverableType, typename TypeMap>
+void RethinkDBProvider::recover_helper(const std::string &table, IdSequence& seq,
+                                       qpid::broker::RecoveryManager& recoverer,
+                                       TypeMap* internal_map)
+{
+    try {
+        uint64_t max_id = 0;
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(table).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum type_data = cursor.next();
+            uint64_t primary_key =
+                static_cast<uint64_t>(type_data.extract_field("id").extract_number());
+            R::Binary blob_data = type_data.extract_field("blob").extract_binary();
+            qpid::framing::Buffer blob(
+                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
+
+            typedef typename RecoverableType::shared_ptr recoverable_shared_ptr;
+            recoverable_shared_ptr object =
+                recover_type<recoverable_shared_ptr>(recoverer, blob);
+
+            object->setPersistenceId(primary_key);
+            if (internal_map) {
+                (*internal_map)[primary_key] = object;
+            }
+
+            fprintf(stderr, "   recovered object(id=%lu)\n", primary_key);
+            max_id = std::max(max_id, primary_key);
+        }
+
+        // start sequence generation one after highest id we recovered
+        seq.reset(max_id + 1);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::recover exception: " + e.message);
+        throw e;
     }
 }
 
@@ -985,6 +1055,8 @@ void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& recoverer)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverConfigs");
+    // recover_helper<broker::RecoverableConfig, std::placeholders::_1>(
+    //     TblConfig, configIdSequence, recoverer, nullptr);
 
     try {
         uint64_t max_configs = 0;
@@ -1017,68 +1089,16 @@ void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& recovere
                                          ExchangeMap& exchangeMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverExchanges");
-
-    try {
-        uint64_t max_exchanges = 0;
-        R::Connection* conn = initConnection();
-        R::Cursor cursor = R::db(options.databaseName).table(TblExchange).run(*conn);
-        while (cursor.has_next()) {
-            R::Datum exchange_data = cursor.next();
-            uint64_t primary_key =
-                static_cast<uint64_t>(exchange_data.extract_field("id").extract_number());
-            R::Binary blob_data = exchange_data.extract_field("blob").extract_binary();
-
-            qpid::framing::Buffer blob(
-                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
-            broker::RecoverableExchange::shared_ptr exchange = recoverer.recoverExchange(blob);
-            exchange->setPersistenceId(primary_key);
-            exchangeMap[primary_key] = exchange;
-
-            fprintf(stderr, "   recovered exchange(id=%lu, name=%s)\n",
-                primary_key, exchange->getName().c_str());
-            max_exchanges = std::max(max_exchanges, primary_key);
-        }
-
-        // start sequence generation one after highest id we recovered
-        exchangeIdSequence.reset(max_exchanges + 1);
-    } catch (const R::Error& e) {
-        QPID_LOG(error, "RethinkDBProvider::recoverExchanges exception: " + e.message);
-        throw e;
-    }
+    recover_helper<broker::RecoverableExchange, ExchangeMap>(
+        TblExchange, exchangeIdSequence, recoverer, &exchangeMap);
 }
 
 void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& recoverer,
                                       QueueMap& queueMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverQueues");
-
-    try {
-        uint64_t max_queues = 0;
-        R::Connection* conn = initConnection();
-        R::Cursor cursor = R::db(options.databaseName).table(TblQueue).run(*conn);
-        while (cursor.has_next()) {
-            R::Datum queue_data = cursor.next();
-            uint64_t primary_key =
-                static_cast<uint64_t>(queue_data.extract_field("id").extract_number());
-            R::Binary blob_data = queue_data.extract_field("blob").extract_binary();
-
-            qpid::framing::Buffer blob(
-                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
-            broker::RecoverableQueue::shared_ptr queue = recoverer.recoverQueue(blob);
-            queue->setPersistenceId(primary_key);
-            queueMap[primary_key] = queue;
-
-            fprintf(stderr, "   recovered queue(id=%lu, name=%s)\n",
-                primary_key, queue->getName().c_str());
-            max_queues = std::max(max_queues, primary_key);
-        }
-
-        // start sequence generation one after highest id we recovered
-        queueIdSequence.reset(max_queues + 1);
-    } catch (const R::Error& e) {
-        QPID_LOG(error, "RethinkDBProvider::recoverQueues exception: " + e.message);
-        throw e;
-    }
+    recover_helper<broker::RecoverableQueue, QueueMap>(
+        TblQueue, queueIdSequence, recoverer, &queueMap);
 }
 
 void RethinkDBProvider::recoverBindings(qpid::broker::RecoveryManager& /*recoverer*/,
