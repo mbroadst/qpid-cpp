@@ -35,30 +35,6 @@ namespace R = RethinkDB;
 
 #include "RethinkDBException.h"
 
-/*
-#include "AmqpTransaction.h"
-#include "BlobAdapter.h"
-#include "BlobRecordset.h"
-#include "BindingRecordset.h"
-#include "MessageMapRecordset.h"
-#include "MessageRecordset.h"
-#include "TplRecordset.h"
-#include "DatabaseConnection.h"
-#include "Exception.h"
-#include "State.h"
-#include "VariantHelper.h"
-
-// Bring in ADO 2.8 (yes, I know it says "15", but that's it...)
-#import "C:\Program Files\Common Files\System\ado\msado15.dll" \
-        no_namespace rename("EOF", "EndOfFile")
-#include <comdef.h>
-
-namespace {
-inline void TESTHR(HRESULT x) {if FAILED(x) _com_issue_error(x);};
-
-}
-*/
-
 namespace qpid {
 namespace store {
 namespace rethinkdb {
@@ -296,9 +272,10 @@ private:    // helpers
     bool create(const std::string& table, IdSequence& seq, const qpid::broker::Persistable& p);
     void destroy(const std::string& table, const qpid::broker::Persistable& p);
 
-    template <typename RecoverableType, typename TypeMap>
+    template <typename RecoverableType, typename TypeMap =
+        std::map<uint64_t, typename RecoverableType:: shared_ptr>>
     void recover_helper(const std::string &table, IdSequence& seq,
-                        qpid::broker::RecoveryManager& recoverer, TypeMap* internal_map = nullptr);
+                        qpid::broker::RecoveryManager& recoverer, TypeMap* internal_map = 0);
 
     void deleteBindingsForQueue(const qpid::broker::PersistableQueue& queue);
     void deleteBindingsForExchange(const qpid::broker::PersistableExchange& exchange);
@@ -636,7 +613,7 @@ void RethinkDBProvider::unbind(const PersistableExchange& exchange,
     try {
         R::Connection* conn = initConnection();
 
-        // @TODO: optimize this later if its important, perhaps use a compound
+        // @TODO: optimize this later if its important. Perhaps use a compound
         //        index of an array of all four values?
         R::db(options.databaseName).table(TblBinding)
             .filter(R::Object{
@@ -864,6 +841,7 @@ void RethinkDBProvider::dequeue(qpid::broker::TransactionContext* /*ctxt*/,
 std::auto_ptr<qpid::broker::TransactionContext> RethinkDBProvider::begin()
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
+    THROW_RDB_EXCEPTION("Not implemented");
     return std::auto_ptr<qpid::broker::TransactionContext>();
 
 /*
@@ -890,6 +868,7 @@ std::auto_ptr<qpid::broker::TPCTransactionContext>
 RethinkDBProvider::begin(const std::string& /*xid*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
+    THROW_RDB_EXCEPTION("Not implemented");
     return std::auto_ptr<qpid::broker::TPCTransactionContext>();
 
 /*
@@ -920,6 +899,7 @@ RethinkDBProvider::begin(const std::string& /*xid*/)
 void RethinkDBProvider::prepare(qpid::broker::TPCTransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::prepare");
+    THROW_RDB_EXCEPTION("Not implemented");
 
 /*
     // Commit all the marked-up enqueue/dequeue ops and the TPL record.
@@ -942,6 +922,7 @@ void RethinkDBProvider::prepare(qpid::broker::TPCTransactionContext& /*txn*/)
 void RethinkDBProvider::commit(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::commit");
+    THROW_RDB_EXCEPTION("Not implemented");
 
 /*
     (void)initState();     // Ensure this thread is initialized
@@ -985,6 +966,7 @@ void RethinkDBProvider::commit(qpid::broker::TransactionContext& /*txn*/)
 void RethinkDBProvider::abort(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::abort");
+    THROW_RDB_EXCEPTION("Not implemented");
 
 /*
     (void)initState();     // Ensure this thread is initialized
@@ -1036,6 +1018,7 @@ void RethinkDBProvider::abort(qpid::broker::TransactionContext& /*txn*/)
 void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::collectPreparedXids");
+    THROW_RDB_EXCEPTION("Not implemented");
 
 /*
     DatabaseConnection *db = initConnection();
@@ -1050,39 +1033,10 @@ void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 */
 }
 
-// @TODO Much of this recovery code is way too similar... refactor to
-// a recover template method on BlobRecordset.
 void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& recoverer)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverConfigs");
-    // recover_helper<broker::RecoverableConfig, std::placeholders::_1>(
-    //     TblConfig, configIdSequence, recoverer, nullptr);
-
-    try {
-        uint64_t max_configs = 0;
-        R::Connection* conn = initConnection();
-        R::Cursor cursor = R::db(options.databaseName).table(TblConfig).run(*conn);
-        while (cursor.has_next()) {
-            R::Datum config_data = cursor.next();
-            uint64_t primary_key =
-                static_cast<uint64_t>(config_data.extract_field("id").extract_number());
-            R::Binary blob_data = config_data.extract_field("blob").extract_binary();
-
-            qpid::framing::Buffer blob(
-                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
-            broker::RecoverableConfig::shared_ptr config = recoverer.recoverConfig(blob);
-            config->setPersistenceId(primary_key);
-
-            fprintf(stderr, "   recovered config(id=%lu)\n", primary_key);
-            max_configs = std::max(max_configs, primary_key);
-        }
-
-        // start sequence generation one after highest id we recovered
-        configIdSequence.reset(max_configs + 1);
-    } catch (const R::Error& e) {
-        QPID_LOG(error, "RethinkDBProvider::recoverConfigs exception: " + e.message);
-        throw e;
-    }
+    recover_helper<broker::RecoverableConfig>(TblConfig, configIdSequence, recoverer);
 }
 
 void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& recoverer,
@@ -1102,70 +1056,46 @@ void RethinkDBProvider::recoverQueues(qpid::broker::RecoveryManager& recoverer,
 }
 
 void RethinkDBProvider::recoverBindings(qpid::broker::RecoveryManager& /*recoverer*/,
-                                        const ExchangeMap& /*exchangeMap*/,
-                                        const QueueMap& /*queueMap*/)
+                                        const ExchangeMap& exchangeMap,
+                                        const QueueMap& queueMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverBindings");
 
-    // R::Connection* conn = initConnection();
-    // R::Cursor cursor = R::db(options.databaseName).table(TblBinding).run(*conn);
-    // while (cursor.has_next()) {
-
-    // }
-
-/*
-    if (rs->BOF && rs->EndOfFile)
-        return;   // Nothing to do
-    rs->MoveFirst();
-    Binding b;
-    IADORecordBinding *piAdoRecordBinding;
-    rs->QueryInterface(__uuidof(IADORecordBinding),
-                       (LPVOID *)&piAdoRecordBinding);
-    piAdoRecordBinding->BindToRecordset(&b);
-    while (!rs->EndOfFile) {
-        long blobSize = rs->Fields->Item["fieldTableBlob"]->ActualSize;
-        BlobAdapter blob(blobSize);
-        blob = rs->Fields->Item["fieldTableBlob"]->GetChunk(blobSize);
-        store::ExchangeMap::const_iterator exch = exchMap.find(b.exchangeId);
-        if (exch == exchMap.end()) {
-            std::ostringstream msg;
-            msg << "Error recovering bindings; exchange ID " << b.exchangeId
-                << " not found in exchange map";
-            throw qpid::Exception(msg.str());
-        }
-        broker::RecoverableExchange::shared_ptr exchPtr = exch->second;
-        store::QueueMap::const_iterator q = queueMap.find(b.queueId);
-        if (q == queueMap.end()) {
-            std::ostringstream msg;
-            msg << "Error recovering bindings; queue ID " << b.queueId
-                << " not found in queue map";
-            throw qpid::Exception(msg.str());
-        }
-        broker::RecoverableQueue::shared_ptr qPtr = q->second;
-        // The recovery manager wants the queue name, so get it from the
-        // RecoverableQueue.
-        std::string key(b.routingKey);
-        exchPtr->bind(qPtr->getName(), key, blob);
-        rs->MoveNext();
-    }
-
-    piAdoRecordBinding->Release();
-*/
-
-/*
-    DatabaseConnection *db = 0;
     try {
-        db = initConnection();
-        BindingRecordset rsBindings;
-        rsBindings.open(db, TblBinding);
-        rsBindings.recover(recoverer, exchangeMap, queueMap);
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(TblBinding).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum binding_data = cursor.next();
+            uint64_t exchange_id(binding_data.extract_field("exchange_id").extract_number());
+            uint64_t queue_id(binding_data.extract_field("queue_id").extract_number());
+            std::string routing_key(binding_data.extract_field("routing_key").extract_string());
+            R::Binary args_data = binding_data.extract_field("args").extract_binary();
+            qpid::framing::Buffer args_blob(
+                const_cast<char*>(args_data.data.data()), (uint32_t)args_data.data.size());
+            qpid::framing::FieldTable args;
+            args_blob.get(args);
+
+            store::ExchangeMap::const_iterator exchange = exchangeMap.find(exchange_id);
+            store::QueueMap::const_iterator queue = queueMap.find(queue_id);
+            if (exchange != exchangeMap.end() && queue != queueMap.end()) {
+                broker::RecoverableExchange::shared_ptr exchangePtr = exchange->second;
+                broker::RecoverableQueue::shared_ptr queuePtr = queue->second;
+                exchangePtr->bind(queuePtr->getName(), routing_key, args);
+                QPID_LOG(info, "Recovered binding exchange=" + exchangePtr->getName()
+                    + " key=" + routing_key
+                    + " queue=" + queuePtr->getName());
+            } else {
+                QPID_LOG(warning, "Deleting stale binding");
+                R::db(options.databaseName).table(TblBinding)
+                    .get(binding_data.extract_field("id").extract_string())
+                    .delete_()
+                    .run(*conn);
+            }
+        }
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::create exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering bindings",
-                           e,
-                           db ? db->getErrors() : "");
-    }
-*/
 }
 
 void RethinkDBProvider::recoverMessages(qpid::broker::RecoveryManager& /*recoverer*/,
@@ -1266,20 +1196,6 @@ void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queu
 }
 
 ////////////// Internal Methods
-
-/*
-State* RethinkDBProvider::initState()
-{
-    QPID_LOG(notice, "RethinkDBProvider::initState");
-
-    State *state = dbState.get();   // See if thread has initialized
-    if (!state) {
-        state = new State;
-        dbState.reset(state);
-    }
-    return state;
-}
-*/
 
 R::Connection* RethinkDBProvider::initConnection(void)
 {
