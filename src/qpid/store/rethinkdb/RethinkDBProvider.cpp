@@ -842,26 +842,7 @@ std::auto_ptr<qpid::broker::TransactionContext> RethinkDBProvider::begin()
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
     THROW_RDB_EXCEPTION("Not implemented");
-    return std::auto_ptr<qpid::broker::TransactionContext>();
-
-/*
-    (void)initState();     // Ensure this thread is initialized
-
-    // Transactions are associated with the Connection, so this transaction
-    // context needs its own connection. At the time of writing, single-phase
-    // transactions are dealt with completely on one thread, so we really
-    // could just use the thread-specific DatabaseConnection for this.
-    // However, that would introduce an ugly, hidden coupling, so play
-    // it safe and handle this just like a TPC transaction, which actually
-    // can be prepared and committed/aborted from different threads,
-    // making it a bad idea to try using the thread-local DatabaseConnection.
-    boost::shared_ptr<DatabaseConnection> db(new DatabaseConnection);
-    db->open(options.connectString, options.catalogName);
-    std::auto_ptr<AmqpTransaction> tx(new AmqpTransaction(db));
-    tx->sqlBegin();
-    std::auto_ptr<qpid::broker::TransactionContext> tc(tx);
-    return tc;
-*/
+    // return std::auto_ptr<qpid::broker::TransactionContext>();
 }
 
 std::auto_ptr<qpid::broker::TPCTransactionContext>
@@ -869,168 +850,31 @@ RethinkDBProvider::begin(const std::string& /*xid*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
     THROW_RDB_EXCEPTION("Not implemented");
-    return std::auto_ptr<qpid::broker::TPCTransactionContext>();
-
-/*
-    (void)initState();     // Ensure this thread is initialized
-    boost::shared_ptr<DatabaseConnection> db(new DatabaseConnection);
-    db->open(options.connectString, options.catalogName);
-    std::auto_ptr<AmqpTPCTransaction> tx(new AmqpTPCTransaction(db, xid));
-    tx->sqlBegin();
-
-    TplRecordset rsTpl;
-    try {
-        tx->sqlBegin();
-        rsTpl.open(db.get(), TblTpl);
-        rsTpl.add(xid);
-        tx->sqlCommit();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        tx->sqlAbort();
-        throw ADOException("Error adding TPL record", e, errs);
-    }
-
-    std::auto_ptr<qpid::broker::TPCTransactionContext> tc(tx);
-    return tc;
-*/
+    // return std::auto_ptr<qpid::broker::TPCTransactionContext>();
 }
 
 void RethinkDBProvider::prepare(qpid::broker::TPCTransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::prepare");
     THROW_RDB_EXCEPTION("Not implemented");
-
-/*
-    // Commit all the marked-up enqueue/dequeue ops and the TPL record.
-    // On commit/rollback the TPL will be removed and the TPL markups
-    // on the message map will be cleaned up as well.
-    (void)initState();     // Ensure this thread is initialized
-    AmqpTPCTransaction *atxn = dynamic_cast<AmqpTPCTransaction*> (&txn);
-    if (atxn == 0)
-        throw qpid::broker::InvalidTransactionContextException();
-    try {
-        atxn->sqlCommit();
-    }
-    catch(_com_error &e) {
-        throw ADOException("Error preparing", e, atxn->dbConn()->getErrors());
-    }
-    atxn->setPrepared();
-*/
 }
 
 void RethinkDBProvider::commit(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::commit");
     THROW_RDB_EXCEPTION("Not implemented");
-
-/*
-    (void)initState();     // Ensure this thread is initialized
-
-    // One-phase transactions simply commit the outer SQL transaction
-    // that was begun on begin(). Two-phase transactions are different -
-    // the SQL transaction started on begin() was committed on prepare()
-    // so all the SQL records reflecting the enqueue/dequeue actions for
-    // the transaction are recorded but with xid markups on them to reflect
-    // that they are prepared but not committed. Now go back and remove
-    // the markups, deleting those marked for removal.
-
-    AmqpTPCTransaction *p2txn = dynamic_cast<AmqpTPCTransaction*> (&txn);
-    if (p2txn == 0) {
-        AmqpTransaction *p1txn = dynamic_cast<AmqpTransaction*> (&txn);
-        if (p1txn == 0)
-            throw qpid::broker::InvalidTransactionContextException();
-        p1txn->sqlCommit();
-        return;
-    }
-
-    DatabaseConnection *db(p2txn->dbConn());
-    TplRecordset rsTpl;
-    MessageMapRecordset rsMessageMap;
-    try {
-        db->beginTransaction();
-        rsTpl.open(db, TblTpl);
-        rsMessageMap.open(db, TblMessageMap);
-        rsMessageMap.commitPrepared(p2txn->getXid());
-        rsTpl.remove(p2txn->getXid());
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error committing transaction", e, errs);
-    }
-*/
 }
 
 void RethinkDBProvider::abort(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::abort");
     THROW_RDB_EXCEPTION("Not implemented");
-
-/*
-    (void)initState();     // Ensure this thread is initialized
-
-    // One-phase and non-prepared two-phase transactions simply abort
-    // the outer SQL transaction that was begun on begin(). However, prepared
-    // two-phase transactions are different - the SQL transaction started
-    // on begin() was committed on prepare() so all the SQL records
-    // reflecting the enqueue/dequeue actions for the transaction are
-    // recorded but with xid markups on them to reflect that they are
-    // prepared but not committed. Now go back and remove the markups,
-    // deleting those marked for addition.
-
-    AmqpTPCTransaction *p2txn = dynamic_cast<AmqpTPCTransaction*> (&txn);
-    if (p2txn == 0 || !p2txn->isPrepared()) {
-        AmqpTransaction *p1txn = dynamic_cast<AmqpTransaction*> (&txn);
-        if (p1txn == 0)
-            throw qpid::broker::InvalidTransactionContextException();
-        p1txn->sqlAbort();
-        return;
-    }
-
-    DatabaseConnection *db(p2txn->dbConn());
-    TplRecordset rsTpl;
-    MessageMapRecordset rsMessageMap;
-    try {
-        db->beginTransaction();
-        rsTpl.open(db, TblTpl);
-        rsMessageMap.open(db, TblMessageMap);
-        rsMessageMap.abortPrepared(p2txn->getXid());
-        rsTpl.remove(p2txn->getXid());
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error committing transaction", e, errs);
-    }
-
-
-    (void)initState();     // Ensure this thread is initialized
-    AmqpTransaction *atxn = dynamic_cast<AmqpTransaction*> (&txn);
-    if (atxn == 0)
-        throw qpid::broker::InvalidTransactionContextException();
-    atxn->sqlAbort();
-*/
 }
 
 void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::collectPreparedXids");
     THROW_RDB_EXCEPTION("Not implemented");
-
-/*
-    DatabaseConnection *db = initConnection();
-    try {
-        TplRecordset rsTpl;
-        rsTpl.open(db, TblTpl);
-        rsTpl.recover(xids);
-    }
-    catch(_com_error &e) {
-        throw ADOException("Error reading TPL", e, db->getErrors());
-    }
-*/
 }
 
 void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& recoverer)
