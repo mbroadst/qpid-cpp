@@ -415,14 +415,32 @@ bool RethinkDBProvider::create(const std::string& table, IdSequence& seq,
     return true;
 }
 
-void RethinkDBProvider::deleteBindingsForQueue(const qpid::broker::PersistableQueue& /*queue*/)
+void RethinkDBProvider::deleteBindingsForQueue(const qpid::broker::PersistableQueue& queue)
 {
-    // @TODO: implement this
+    try {
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(TblBinding)
+            .filter(R::Object{ { "queue_id", queue.getPersistenceId() } })
+            .delete_()
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::deleteBindingsForQueue exception: " + e.message);
+        throw e;
+    }
 }
 
-void RethinkDBProvider::deleteBindingsForExchange(const qpid::broker::PersistableExchange& /*exchange*/)
+void RethinkDBProvider::deleteBindingsForExchange(const qpid::broker::PersistableExchange& exchange)
 {
-    // @TODO: implement this
+    try {
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(TblBinding)
+            .filter(R::Object{ { "exchange_id", exchange.getPersistenceId() } })
+            .delete_()
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::deleteBindingsForQueue exception: " + e.message);
+        throw e;
+    }
 }
 
 void RethinkDBProvider::destroy(const std::string& table, const qpid::broker::Persistable& p)
