@@ -603,129 +603,6 @@ void RethinkDBProvider::create(const PersistableConfig& config)
 }
 
 /**
- * Destroy generic durable configuration
- */
-void RethinkDBProvider::destroy(const PersistableConfig& config)
-{
-    QPID_LOG(notice, "RethinkDBProvider::destroy config=" + config.getName());
-    destroy(TblConfig, config);
-}
-
-/**
- * Stores a messages before it has been enqueued
- * (enqueueing automatically stores the message so this is
- * only required if storage is required prior to that
- * point). If the message has not yet been stored it will
- * store the headers as well as any content passed in. A
- * persistence id will be set on the message which can be
- * used to load the content or to append to it.
- */
-void RethinkDBProvider::stage(const boost::intrusive_ptr<PersistableMessage>& /*msg*/)
-{
-    QPID_LOG(notice, "RethinkDBProvider::stage");
-
-/*
-    DatabaseConnection *db = initConnection();
-    MessageRecordset rsMessages;
-    try {
-        db->beginTransaction();
-        rsMessages.open(db, TblMessage);
-        rsMessages.add(msg);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error staging message", e, errs);
-    }
-*/
-}
-
-/**
- * Destroys a previously staged message. This only needs
- * to be called if the message is never enqueued. (Once
- * enqueued, deletion will be automatic when the message
- * is dequeued from all queues it was enqueued onto).
- */
-void RethinkDBProvider::destroy(PersistableMessage& /*msg*/)
-{
-    QPID_LOG(notice, "RethinkDBProvider::destroy");
-
-/*
-    DatabaseConnection *db = initConnection();
-    BlobRecordset rsMessages;
-    try {
-        db->beginTransaction();
-        rsMessages.open(db, TblMessage);
-        rsMessages.remove(msg);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error deleting message", e, errs);
-    }
-*/
-}
-
-/**
- * Appends content to a previously staged message
- */
-void RethinkDBProvider::appendContent(const boost::intrusive_ptr<const PersistableMessage>& /*msg*/,
-                                      const std::string& /*data*/)
-{
-    QPID_LOG(notice, "RethinkDBProvider::appendContent");
-
-/*
-    DatabaseConnection *db = initConnection();
-    MessageRecordset rsMessages;
-    try {
-        db->beginTransaction();
-        rsMessages.open(db, TblMessage);
-        rsMessages.append(msg, data);
-        db->commitTransaction();
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        db->rollbackTransaction();
-        throw ADOException("Error appending to message", e, errs);
-    }
-*/
-}
-
-/**
- * Loads (a section) of content data for the specified
- * message (previously stored through a call to stage or
- * enqueue) into data. The offset refers to the content
- * only (i.e. an offset of 0 implies that the start of the
- * content should be loaded, not the headers or related
- * meta-data).
- */
-void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queue*/,
-                                    const boost::intrusive_ptr<const PersistableMessage>& /*msg*/,
-                                    std::string& /*data*/,
-                                    uint64_t /*offset*/,
-                                    uint32_t /*length*/)
-{
-    QPID_LOG(notice, "RethinkDBProvider::loadContent");
-
-/*
-    // SQL store keeps all messages in one table, so we don't need the
-    // queue reference.
-    DatabaseConnection *db = initConnection();
-    MessageRecordset rsMessages;
-    try {
-        rsMessages.open(db, TblMessage);
-        rsMessages.loadContent(msg, data, offset, length);
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        throw ADOException("Error loading message content", e, errs);
-    }
-*/
-}
-
-/**
  * Enqueues a message, storing the message if it has not
  * been previously stored and recording that the given
  * message is on the given queue.
@@ -734,11 +611,50 @@ void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queu
  * @param msg The message to enqueue
  * @param queue the name of the queue onto which it is to be enqueued
  */
-void RethinkDBProvider::enqueue(qpid::broker::TransactionContext* /*ctxt*/,
-                                const boost::intrusive_ptr<PersistableMessage>& /*msg*/,
-                                const PersistableQueue& /*queue*/)
+void RethinkDBProvider::enqueue(qpid::broker::TransactionContext* ctxt,
+                                const boost::intrusive_ptr<PersistableMessage>& msg,
+                                const PersistableQueue& queue)
 {
     QPID_LOG(notice, "RethinkDBProvider::enqueue");
+    uint64_t queueId(queue.getPersistenceId());
+    if (queueId == 0) {
+        THROW_RDB_EXCEPTION("Queue not created: " + queue.getName());
+    }
+
+    // @TODO: handle transactions
+
+    if (msg->getPersistenceId() == 0) {
+        QPID_LOG(notice, "message has no existing persistence id");
+
+        /*
+        uint64_t primary_key(messageIdSequence.next());
+        msg->setPersistenceId(primary_key);
+
+        std::vector<char> msg_data(msg->encodedSize() + sizeof(uint32_t));
+        qpid::framing::Buffer msg_blob(args_data.data(), args_data.size());
+        msg_blob.putLong(item->encodedHeaderSize());
+        msg->encode(msg_blob);
+
+        try {
+            R::Connection* conn = initConnection();
+            R::db(options.databaseName).table(TblMessage)
+                .insert({
+                    { "id", primary_key },
+                    { "blob", R::Binary(std::string(msg_blob.data(), msg_blob.size())) }
+                })
+                .run(*conn);
+        } catch (const R::Error& e) {
+            QPID_LOG(error, "RethinkDBProvider::unbind exception: " + e.message);
+            throw e;
+        }
+        */
+    }
+
+    // add queue* to the txn map..
+    if (ctxt) {
+        QPID_LOG(notice, "ctxt exists");
+        // txn->addXidRecord(queue_.getExternalQueueStore());
+    }
 
 /*
     // If this enqueue is in the context of a transaction, use the specified
@@ -1066,38 +982,35 @@ void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 
 // @TODO Much of this recovery code is way too similar... refactor to
 // a recover template method on BlobRecordset.
-void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& /*recoverer*/)
+void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& recoverer)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverConfigs");
 
-/*
-    DatabaseConnection *db = 0;
     try {
-        db = initConnection();
-        BlobRecordset rsConfigs;
-        rsConfigs.open(db, TblConfig);
-        _RecordsetPtr p = (_RecordsetPtr)rsConfigs;
-        if (p->BOF && p->EndOfFile)
-            return;   // Nothing to do
-        p->MoveFirst();
-        while (!p->EndOfFile) {
-            uint64_t id = p->Fields->Item["persistenceId"]->Value;
-            long blobSize = p->Fields->Item["fieldTableBlob"]->ActualSize;
-            BlobAdapter blob(blobSize);
-            blob = p->Fields->Item["fieldTableBlob"]->GetChunk(blobSize);
-            // Recreate the Config instance and reset its ID.
-            broker::RecoverableConfig::shared_ptr config =
-                recoverer.recoverConfig(blob);
-            config->setPersistenceId(id);
-            p->MoveNext();
+        uint64_t max_configs = 0;
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(TblConfig).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum config_data = cursor.next();
+            uint64_t primary_key =
+                static_cast<uint64_t>(config_data.extract_field("id").extract_number());
+            R::Binary blob_data = config_data.extract_field("blob").extract_binary();
+
+            qpid::framing::Buffer blob(
+                const_cast<char*>(blob_data.data.data()), (uint32_t)blob_data.data.size());
+            broker::RecoverableConfig::shared_ptr config = recoverer.recoverConfig(blob);
+            config->setPersistenceId(primary_key);
+
+            fprintf(stderr, "   recovered config(id=%lu)\n", primary_key);
+            max_configs = std::max(max_configs, primary_key);
         }
+
+        // start sequence generation one after highest id we recovered
+        configIdSequence.reset(max_configs + 1);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::recoverConfigs exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering configs",
-                           e,
-                           db ? db->getErrors() : "");
-    }
-*/
 }
 
 void RethinkDBProvider::recoverExchanges(qpid::broker::RecoveryManager& recoverer,
@@ -1298,6 +1211,40 @@ void RethinkDBProvider::recoverTransactions(qpid::broker::RecoveryManager& /*rec
 */
 }
 
+/**
+ * Destroy generic durable configuration
+ */
+void RethinkDBProvider::destroy(const PersistableConfig& config)
+{
+    QPID_LOG(notice, "RethinkDBProvider::destroy config=" + config.getName());
+    destroy(TblConfig, config);
+}
+
+void RethinkDBProvider::stage(const boost::intrusive_ptr<PersistableMessage>& /*msg*/)
+{
+    THROW_RDB_EXCEPTION("Not implemented");
+}
+
+void RethinkDBProvider::destroy(PersistableMessage& /*msg*/)
+{
+    THROW_RDB_EXCEPTION("Not implemented");
+}
+
+void RethinkDBProvider::appendContent(const boost::intrusive_ptr<const PersistableMessage>& /*msg*/,
+                                      const std::string& /*data*/)
+{
+    THROW_RDB_EXCEPTION("Not implemented");
+}
+
+void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queue*/,
+                                    const boost::intrusive_ptr<const PersistableMessage>& /*msg*/,
+                                    std::string& /*data*/,
+                                    uint64_t /*offset*/,
+                                    uint32_t /*length*/)
+{
+    THROW_RDB_EXCEPTION("Not implemented");
+}
+
 ////////////// Internal Methods
 
 /*
@@ -1311,21 +1258,6 @@ State* RethinkDBProvider::initState()
         dbState.reset(state);
     }
     return state;
-}
-*/
-
-/*
-DatabaseConnection* RethinkDBProvider::initConnection(void)
-{
-    QPID_LOG(notice, "RethinkDBProvider::initConnection");
-
-    State *state = initState();
-    if (state->dbConn != 0)
-        return state->dbConn;    // And the DatabaseConnection is set up too
-    std::auto_ptr<DatabaseConnection> db(new DatabaseConnection);
-    db->open(options.connectString, options.catalogName);
-    state->dbConn = db.release();
-    return state->dbConn;
 }
 */
 
@@ -1431,7 +1363,6 @@ void RethinkDBProvider::dump()
 {
   // dump all db records to qpid_log
   QPID_LOG(notice, "DB Dump: (not dumping anything)");
-  //  rsQueues.dump();
 }
 
 
