@@ -681,97 +681,38 @@ void RethinkDBProvider::enqueue(qpid::broker::TransactionContext* ctxt,
                                 const PersistableQueue& queue)
 {
     QPID_LOG(notice, "RethinkDBProvider::enqueue");
-    uint64_t queueId(queue.getPersistenceId());
-    if (queueId == 0) {
+    if (ctxt) {
+        THROW_RDB_EXCEPTION("Transactions are not presently implemented");
+    }
+
+    uint64_t queue_id(queue.getPersistenceId());
+    if (queue_id == 0) {
         THROW_RDB_EXCEPTION("Queue not created: " + queue.getName());
     }
 
-    // @TODO: handle transactions
-
     if (msg->getPersistenceId() == 0) {
-        QPID_LOG(notice, "message has no existing persistence id");
-
-        /*
-        uint64_t primary_key(messageIdSequence.next());
-        msg->setPersistenceId(primary_key);
-
-        std::vector<char> msg_data(msg->encodedSize() + sizeof(uint32_t));
-        qpid::framing::Buffer msg_blob(args_data.data(), args_data.size());
-        msg_blob.putLong(item->encodedHeaderSize());
-        msg->encode(msg_blob);
-
-        try {
-            R::Connection* conn = initConnection();
-            R::db(options.databaseName).table(TblMessage)
-                .insert({
-                    { "id", primary_key },
-                    { "blob", R::Binary(std::string(msg_blob.data(), msg_blob.size())) }
-                })
-                .run(*conn);
-        } catch (const R::Error& e) {
-            QPID_LOG(error, "RethinkDBProvider::unbind exception: " + e.message);
-            throw e;
-        }
-        */
+        msg->setPersistenceId(messageIdSequence.next());
     }
 
-    // add queue* to the txn map..
-    if (ctxt) {
-        QPID_LOG(notice, "ctxt exists");
-        // txn->addXidRecord(queue_.getExternalQueueStore());
-    }
+    std::vector<char> msg_data(msg->encodedSize() + sizeof(uint32_t));
+    qpid::framing::Buffer msg_blob(msg_data.data(), msg_data.size());
+    msg_blob.putLong(msg->encodedHeaderSize());
+    msg->encode(msg_blob);
 
-/*
-    // If this enqueue is in the context of a transaction, use the specified
-    // transaction to nest a new transaction for this operation. However, if
-    // this is not in the context of a transaction, then just use the thread's
-    // DatabaseConnection with a ADO transaction.
-    DatabaseConnection *db = 0;
-    std::string xid;
-    AmqpTransaction *atxn = dynamic_cast<AmqpTransaction*> (ctxt);
-    if (atxn == 0) {
-        db = initConnection();
-        db->beginTransaction();
-    }
-    else {
-        (void)initState();     // Ensure this thread is initialized
-        // It's a transactional enqueue; if it's TPC, grab the xid.
-        AmqpTPCTransaction *tpcTxn = dynamic_cast<AmqpTPCTransaction*> (ctxt);
-        if (tpcTxn)
-            xid = tpcTxn->getXid();
-        db = atxn->dbConn();
-        try {
-            atxn->sqlBegin();
-        }
-        catch(_com_error &e) {
-            throw ADOException("Error queuing message", e, db->getErrors());
-        }
-    }
-
-    MessageRecordset rsMessages;
-    MessageMapRecordset rsMap;
     try {
-        if (msg->getPersistenceId() == 0) {    // Message itself not yet saved
-            rsMessages.open(db, TblMessage);
-            rsMessages.add(msg);
-        }
-        rsMap.open(db, TblMessageMap);
-        rsMap.add(msg->getPersistenceId(), queue.getPersistenceId(), xid);
-        if (atxn)
-            atxn->sqlCommit();
-        else
-            db->commitTransaction();
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(TblMessage)
+            .insert(R::Object{
+                { "id", R::Array{ queue_id, msg->getPersistenceId() } },
+                { "blob", R::Binary(std::string(msg_data.data(), msg_data.size())) }
+            })
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::enqueue exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        if (atxn)
-            atxn->sqlAbort();
-        else
-            db->rollbackTransaction();
-        throw ADOException("Error queuing message", e, errs);
-    }
+
     msg->enqueueComplete();
-*/
 }
 
 /**
@@ -783,77 +724,38 @@ void RethinkDBProvider::enqueue(qpid::broker::TransactionContext* ctxt,
  * @param msg The message to dequeue
  * @param queue The queue from which it is to be dequeued
  */
-void RethinkDBProvider::dequeue(qpid::broker::TransactionContext* /*ctxt*/,
-                                const boost::intrusive_ptr<PersistableMessage>& /*msg*/,
-                                const PersistableQueue& /*queue*/)
+void RethinkDBProvider::dequeue(qpid::broker::TransactionContext* ctxt,
+                                const boost::intrusive_ptr<PersistableMessage>& msg,
+                                const PersistableQueue& queue)
 {
     QPID_LOG(notice, "RethinkDBProvider::dequeue");
 
-/*
-    // If this dequeue is in the context of a transaction, use the specified
-    // transaction to nest a new transaction for this operation. However, if
-    // this is not in the context of a transaction, then just use the thread's
-    // DatabaseConnection with a ADO transaction.
-    DatabaseConnection *db = 0;
-    std::string xid;
-    AmqpTransaction *atxn = dynamic_cast<AmqpTransaction*> (ctxt);
-    if (atxn == 0) {
-        db = initConnection();
-        db->beginTransaction();
-    }
-    else {
-        (void)initState();     // Ensure this thread is initialized
-        // It's a transactional dequeue; if it's TPC, grab the xid.
-        AmqpTPCTransaction *tpcTxn = dynamic_cast<AmqpTPCTransaction*> (ctxt);
-        if (tpcTxn)
-            xid = tpcTxn->getXid();
-        db = atxn->dbConn();
-        try {
-            atxn->sqlBegin();
-        }
-        catch(_com_error &e) {
-            throw ADOException("Error queuing message", e, db->getErrors());
-        }
+    if (ctxt) {
+        THROW_RDB_EXCEPTION("Transactions are not presently implemented");
     }
 
-    MessageMapRecordset rsMap;
+    uint64_t queue_id(queue.getPersistenceId());
+    if (queue_id == 0) {
+        THROW_RDB_EXCEPTION("Queue \"" + queue.getName() + "\" has null queue Id (has not been created)");
+    }
+
+    uint64_t message_id(msg->getPersistenceId());
+    if (message_id == 0) {
+        THROW_RDB_EXCEPTION("Queue \"" + queue.getName() + "\": Dequeuing message with null persistence id.");
+    }
+
     try {
-        rsMap.open(db, TblMessageMap);
-        // TPC dequeues are just marked pending and will actually be removed
-        // when the transaction commits; Single-phase dequeues are removed
-        // now, relying on the SQL transaction to put it back if the
-        // transaction doesn't commit.
-        if (!xid.empty()) {
-            rsMap.pendingRemove(msg->getPersistenceId(),
-                                queue.getPersistenceId(),
-                                xid);
-        }
-        else {
-            rsMap.remove(msg->getPersistenceId(),
-                         queue.getPersistenceId());
-        }
-        if (atxn)
-            atxn->sqlCommit();
-        else
-            db->commitTransaction();
+        R::Connection* conn = initConnection();
+        R::db(options.databaseName).table(TblMessage)
+            .get(R::Array{ queue_id, message_id })
+            .delete_()
+            .run(*conn);
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::enqueue exception: " + e.message);
+        throw e;
     }
-    catch(ms_sql::Exception&) {
-        if (atxn)
-            atxn->sqlAbort();
-        else
-            db->rollbackTransaction();
-        throw;
-    }
-    catch(_com_error &e) {
-        std::string errs = db->getErrors();
-        if (atxn)
-            atxn->sqlAbort();
-        else
-            db->rollbackTransaction();
-        throw ADOException("Error dequeuing message", e, errs);
-    }
+
     msg->dequeueComplete();
-*/
 }
 
 std::auto_ptr<qpid::broker::TransactionContext> RethinkDBProvider::begin()
@@ -960,67 +862,57 @@ void RethinkDBProvider::recoverBindings(qpid::broker::RecoveryManager& /*recover
     }
 }
 
-void RethinkDBProvider::recoverMessages(qpid::broker::RecoveryManager& /*recoverer*/,
-                                        MessageMap& /*messageMap*/,
-                                        MessageQueueMap& /*messageQueueMap*/)
+void RethinkDBProvider::recoverMessages(qpid::broker::RecoveryManager& recoverer,
+                                        MessageMap& messageMap,
+                                        MessageQueueMap& messageQueueMap)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverMessages");
 
-/*
-    DatabaseConnection *db = 0;
-    try {
-        db = initConnection();
-        MessageRecordset rsMessages;
-        rsMessages.open(db, TblMessage);
-        rsMessages.recover(recoverer, messageMap);
+    size_t preamble_length = sizeof(uint32_t);  // header size
 
-        MessageMapRecordset rsMessageMaps;
-        rsMessageMaps.open(db, TblMessageMap);
-        rsMessageMaps.recover(messageQueueMap);
+    try {
+        R::Connection* conn = initConnection();
+        R::Cursor cursor = R::db(options.databaseName).table(TblMessage).run(*conn);
+        while (cursor.has_next()) {
+            R::Datum message_data = cursor.next();
+            uint64_t queue_id(message_data.extract_field("id").extract_nth(0).extract_number());
+            uint64_t message_id(message_data.extract_field("id").extract_nth(1).extract_number());
+            R::Binary blob_data = message_data.extract_field("blob").extract_binary();
+
+            // @TODO: support transactions
+
+            // handle message map
+            qpid::store::QueueEntry queue_entry(queue_id);
+            queue_entry.tplStatus = qpid::store::QueueEntry::NONE;
+            messageQueueMap[message_id].push_back(queue_entry);
+
+            // handle message queue map
+            uint32_t header_size = qpid::framing::Buffer(
+                const_cast<char*>(blob_data.data.data()), preamble_length).getLong();
+            qpid::framing::Buffer message_blob(
+                const_cast<char*>(blob_data.data.data()) + preamble_length, header_size);
+            broker::RecoverableMessage::shared_ptr msg =
+                recoverer.recoverMessage(message_blob);
+            msg->setPersistenceId(message_id);
+
+            // At some future point if delivery attempts are stored, then this call would
+            // become optional depending on that information.
+            msg->setRedelivered();
+            // Reset the TTL for the recovered message
+            msg->computeExpiration();
+            messageMap[message_id] = msg;
+        }
+    } catch (const R::Error& e) {
+        QPID_LOG(error, "RethinkDBProvider::create exception: " + e.message);
+        throw e;
     }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering messages",
-                           e,
-                           db ? db->getErrors() : "");
-    }
-*/
 }
 
 void RethinkDBProvider::recoverTransactions(qpid::broker::RecoveryManager& /*recoverer*/,
                                             PreparedTransactionMap& /*dtxMap*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverTransactions");
-
-/*
-    DatabaseConnection *db = initConnection();
-    std::set<std::string> xids;
-    try {
-        TplRecordset rsTpl;
-        rsTpl.open(db, TblTpl);
-        rsTpl.recover(xids);
-    }
-    catch(_com_error &e) {
-        throw ADOException("Error recovering TPL records", e, db->getErrors());
-    }
-
-    try {
-        // Rebuild the needed RecoverableTransactions.
-        for (std::set<std::string>::const_iterator iXid = xids.begin();
-             iXid != xids.end();
-             ++iXid) {
-            boost::shared_ptr<DatabaseConnection> dbX(new DatabaseConnection);
-            dbX->open(options.connectString, options.catalogName);
-            std::auto_ptr<AmqpTPCTransaction> tx(new AmqpTPCTransaction(dbX,
-                                                                        *iXid));
-            tx->setPrepared();
-            std::auto_ptr<qpid::broker::TPCTransactionContext> tc(tx);
-            dtxMap[*iXid] = recoverer.recoverTransaction(*iXid, tc);
-        }
-    }
-    catch(_com_error &e) {
-        throw ADOException("Error recreating dtx connection", e);
-    }
-*/
+    // THROW_RDB_EXCEPTION("Not implemented");
 }
 
 /**
@@ -1085,76 +977,6 @@ void RethinkDBProvider::createDb(R::Connection *conn, const std::string& name)
     } catch (const R::Error& error) {
         QPID_LOG(notice, "something went horribly wrong: " + error.message);
     }
-
-/*
-    const std::string dbCmd = "CREATE DATABASE " + name;
-    const std::string useCmd = "USE " + name;
-    const std::string tableCmd = "CREATE TABLE ";
-    const std::string colSpecs =
-        " (persistenceId bigint PRIMARY KEY NOT NULL IDENTITY(1,1),"
-        "  fieldTableBlob varbinary(MAX) NOT NULL)";
-    const std::string bindingSpecs =
-        " (exchangeId bigint REFERENCES tblExchange(persistenceId) NOT NULL,"
-        "  queueId bigint REFERENCES tblQueue(persistenceId) NOT NULL,"
-        "  routingKey varchar(255),"
-        "  fieldTableBlob varbinary(MAX))";
-    const std::string messageMapSpecs =
-        " (messageId bigint REFERENCES tblMessage(persistenceId) NOT NULL,"
-        "  queueId bigint REFERENCES tblQueue(persistenceId) NOT NULL,"
-        "  prepareStatus tinyint CHECK (prepareStatus IS NULL OR "
-        "    prepareStatus IN (1, 2)),"
-        "  xid varbinary(512) REFERENCES tblTPL(xid)"
-        "  CONSTRAINT CK_NoDups UNIQUE NONCLUSTERED (messageId, queueId) )";
-    const std::string tplSpecs = " (xid varbinary(512) PRIMARY KEY NOT NULL)";
-    // SET NOCOUNT ON added to prevent extra result sets from
-    // interfering with SELECT statements. (Added by SQL Management)
-    const std::string removeUnrefMsgsTrigger =
-        "CREATE TRIGGER dbo.RemoveUnreferencedMessages "
-        "ON  tblMessageMap AFTER DELETE AS BEGIN "
-        "SET NOCOUNT ON; "
-        "DELETE FROM tblMessage "
-        "WHERE tblMessage.persistenceId IN "
-        "  (SELECT messageId FROM deleted) AND"
-        "  NOT EXISTS(SELECT * FROM tblMessageMap"
-        "             WHERE tblMessageMap.messageId IN"
-        "               (SELECT messageId FROM deleted)) "
-        "END";
-
-    _variant_t unused;
-    _bstr_t dbStr = dbCmd.c_str();
-    _ConnectionPtr conn(*db);
-    try {
-        conn->Execute(dbStr, &unused, adExecuteNoRecords);
-        _bstr_t useStr = useCmd.c_str();
-        conn->Execute(useStr, &unused, adExecuteNoRecords);
-        std::string makeTable = tableCmd + TblQueue + colSpecs;
-        _bstr_t makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblExchange + colSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblConfig + colSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblMessage + colSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblBinding + bindingSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblTpl + tplSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        makeTable = tableCmd + TblMessageMap + messageMapSpecs;
-        makeTableStr = makeTable.c_str();
-        conn->Execute(makeTableStr, &unused, adExecuteNoRecords);
-        _bstr_t addTriggerStr = removeUnrefMsgsTrigger.c_str();
-        conn->Execute(addTriggerStr, &unused, adExecuteNoRecords);
-    }
-    catch(_com_error &e) {
-        throw ADOException("MSSQL can't create " + name, e, db->getErrors());
-    }
-*/
 }
 
 void RethinkDBProvider::dump()
@@ -1162,6 +984,5 @@ void RethinkDBProvider::dump()
   // dump all db records to qpid_log
   QPID_LOG(notice, "DB Dump: (not dumping anything)");
 }
-
 
 }}} // namespace qpid::store::rethinkdb
