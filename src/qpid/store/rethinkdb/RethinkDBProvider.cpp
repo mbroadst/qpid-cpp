@@ -48,6 +48,7 @@ const std::string TblMessageMap("tblMessageMap");
 const std::string TblQueue("tblQueue");
 const std::string TblTpl("tblTPL");
 
+const uint64_t MAX_SAFE_SEQUENCE_NUMBER = 9007199254740991; // 2^53 - 1
 class IdSequence
 {
     std::mutex lock;
@@ -56,13 +57,17 @@ public:
     IdSequence() : id(1) {}
     uint64_t next() {
         std::unique_lock<std::mutex> guard(lock);
-        if (!id) id++; // avoid 0 when folding around
+        id++;
+        if (id >= MAX_SAFE_SEQUENCE_NUMBER) {
+            id = 1;
+        }
+
         return id++;
     }
 
     void reset(uint64_t value) {
         // deliberately not threadsafe, used only on recovery
-        id = value;
+        id = (value >= MAX_SAFE_SEQUENCE_NUMBER || value <= 0) ? 1 : value;
     }
 };
 
