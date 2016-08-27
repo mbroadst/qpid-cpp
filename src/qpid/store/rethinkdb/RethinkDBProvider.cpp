@@ -766,40 +766,40 @@ void RethinkDBProvider::dequeue(qpid::broker::TransactionContext* ctxt,
 std::auto_ptr<qpid::broker::TransactionContext> RethinkDBProvider::begin()
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
-    THROW_RDB_EXCEPTION("Not implemented");
-    // return std::auto_ptr<qpid::broker::TransactionContext>();
+    RDB_WARN_UNIMPLEMENTED("transactions");
+    return std::auto_ptr<qpid::broker::TransactionContext>();
 }
 
 std::auto_ptr<qpid::broker::TPCTransactionContext>
 RethinkDBProvider::begin(const std::string& /*xid*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::begin");
-    THROW_RDB_EXCEPTION("Not implemented");
-    // return std::auto_ptr<qpid::broker::TPCTransactionContext>();
+    RDB_WARN_UNIMPLEMENTED("transactions");
+    return std::auto_ptr<qpid::broker::TPCTransactionContext>();
 }
 
 void RethinkDBProvider::prepare(qpid::broker::TPCTransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::prepare");
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("transactions");
 }
 
 void RethinkDBProvider::commit(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::commit");
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("transactions");
 }
 
 void RethinkDBProvider::abort(qpid::broker::TransactionContext& /*txn*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::abort");
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("transactions");
 }
 
 void RethinkDBProvider::collectPreparedXids(std::set<std::string>& /*xids*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::collectPreparedXids");
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("transactions");
 }
 
 void RethinkDBProvider::recoverConfigs(qpid::broker::RecoveryManager& recoverer)
@@ -917,7 +917,7 @@ void RethinkDBProvider::recoverTransactions(qpid::broker::RecoveryManager& /*rec
                                             PreparedTransactionMap& /*dtxMap*/)
 {
     QPID_LOG(notice, "RethinkDBProvider::recoverTransactions");
-    // THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("transactions");
 }
 
 /**
@@ -931,18 +931,18 @@ void RethinkDBProvider::destroy(const PersistableConfig& config)
 
 void RethinkDBProvider::stage(const boost::intrusive_ptr<PersistableMessage>& /*msg*/)
 {
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("stage");
 }
 
 void RethinkDBProvider::destroy(PersistableMessage& /*msg*/)
 {
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("destroy");
 }
 
 void RethinkDBProvider::appendContent(const boost::intrusive_ptr<const PersistableMessage>& /*msg*/,
                                       const std::string& /*data*/)
 {
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("appendContent");
 }
 
 void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queue*/,
@@ -951,7 +951,7 @@ void RethinkDBProvider::loadContent(const qpid::broker::PersistableQueue& /*queu
                                     uint64_t /*offset*/,
                                     uint32_t /*length*/)
 {
-    THROW_RDB_EXCEPTION("Not implemented");
+    RDB_WARN_UNIMPLEMENTED("loadContent");
 }
 
 ////////////// Internal Methods

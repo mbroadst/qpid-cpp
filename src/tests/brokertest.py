@@ -287,7 +287,9 @@ class Broker(Popen):
         self._port=port
         args = copy(args)
         if BrokerTest.amqp_lib: args += ["--load-module", BrokerTest.amqp_lib]
-        if BrokerTest.store_lib and not test_store:
+        if BrokerTest.rdb_store_lib and not test_store:
+            args += ['--load-module', BrokerTest.rdb_store_lib]
+        elif BrokerTest.store_lib and not test_store:
             args += ['--load-module', BrokerTest.store_lib]
             if BrokerTest.sql_store_lib:
                 args += ['--load-module', BrokerTest.sql_store_lib]
@@ -353,7 +355,7 @@ class Broker(Popen):
           if (self.test.protocol and qm == qpid_messaging):
             kwargs.setdefault("protocol", self.test.protocol)
         return connection_class.establish(self.host_port(), timeout=timeout, **kwargs)
-    
+
     @property
     def agent(self, **kwargs):
         """Return a BrokerAgent for this broker"""
@@ -484,6 +486,7 @@ class BrokerTest(TestCase):
     qpid_route_exec = "qpid-route"
     receiver_exec = "receiver"
     sender_exec = "sender"
+    rdb_store_lib = os.getenv("STORE_RDB_LIB")
     sql_store_lib = os.getenv("STORE_SQL_LIB")
     sql_clfs_store_lib = os.getenv("STORE_SQL_CLFS_LIB")
     sql_catalog = os.getenv("STORE_CATALOG")
@@ -504,7 +507,7 @@ class BrokerTest(TestCase):
     PN_TX_VERSION = (0, 9)
 
     amqp_tx_supported = PN_VERSION >= PN_TX_VERSION
-    
+
     def configure(self, config): self.config=config
 
     def setUp(self):

@@ -24,6 +24,8 @@ public:
   throw RethinkDBException(boost::str(boost::format("%s (%s:%d)") % (MESSAGE) % __FILE__ % __LINE__))
 #define THROW_RDB_EXCEPTION_2(MESSAGE, EXCEPTION) \
   throw RethinkDBException(boost::str(boost::format("%s (%s:%d)") % (MESSAGE) % __FILE__ % __LINE__), EXCEPTION)
+#define RDB_WARN_UNIMPLEMENTED(MESSAGE) \
+  QPID_LOG(warning, boost::str(boost::format("Not implemented: %s (%s:%d)") % (MESSAGE) % __FILE__ % __LINE__))
 
 }}}
 
